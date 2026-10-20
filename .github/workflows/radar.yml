@@ -43,6 +43,7 @@ jobs:
     timeout-minutes: 30
     env:
       COMMAND: ${{ github.event.inputs.command || (github.event.schedule == '30 1 * * *' && 'daily' || 'sources') }}
+      RADAR_MODE: ${{ vars.RADAR_MODE || 'free' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,16 +64,33 @@ jobs:
         env:
           AISA_API_KEY: ${{ secrets.AISA_API_KEY }}
           GOANYAPI_API_KEY: ${{ secrets.GOANYAPI_API_KEY }}
+          TRUSTMRR_API_KEY: ${{ secrets.TRUSTMRR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GSC_TOKEN_JSON: ${{ secrets.GSC_TOKEN_JSON }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           RADAR_EMAIL_TO: ${{ secrets.RADAR_EMAIL_TO }}
         run: |
+          # 免费模式明确跳过付费功能；完整模式必须主动选择并配置密钥。
+          sources_skip="x,judge"
+          daily_skip="x,hf,newsites,revenue,asks,gsc,review,judge,usecases,tutorials"
+          if [ "$RADAR_MODE" = "full" ]; then
+            if [ -z "$AISA_API_KEY" ]; then
+              echo "::error::完整模式需要先配置 AISA_API_KEY。"
+              exit 1
+            fi
+            sources_skip=""
+            # 上游仍记录新站接口异常，暂时跳过该信号。
+            daily_skip="x,hf,newsites"
+          elif [ "$RADAR_MODE" != "free" ]; then
+            echo "::error::RADAR_MODE 只能为 free 或 full。"
+            exit 1
+          fi
+          printf '### 运行配置\n\n模式：`%s`；任务：`%s`。免费模式不包含关键词搜索量、竞争分析及 Trends 复盘。\n\n' "$RADAR_MODE" "$COMMAND" >> "$GITHUB_STEP_SUMMARY"
           if [ "$COMMAND" = "daily" ]; then
-            python -m radar daily --skip x,hf --out report.md ${RADAR_EMAIL_TO:+--mail}
+            python -m radar daily --skip "$daily_skip" --out report.md ${RADAR_EMAIL_TO:+--mail}
           else
-            python -m radar sources --out report.md ${RADAR_EMAIL_TO:+--mail}
+            python -m radar sources --skip "$sources_skip" --out report.md ${RADAR_EMAIL_TO:+--mail}
           fi
           if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
 
@@ -91,6 +109,6 @@ jobs:
           path: |
             report.md
             report.json
-            state/radar.db
+            state/
           if-no-files-found: ignore
           retention-days: 30
