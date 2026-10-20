@@ -1,17 +1,19 @@
-"""Mail a report (Markdown) through Resend. Optional.
+"""可选的日报邮件：默认使用 Resend，RADAR_MAIL_PROVIDER=qq 时使用 QQ SMTP。
 
-Environment: RESEND_API_KEY, EMAIL_FROM (an address on a domain you verified in Resend),
-RADAR_EMAIL_TO (comma-separated for several). Without RADAR_EMAIL_TO it says so and does
-nothing: a missing recipient must not fail the run that produced the report.
-Needs the `markdown` package (pip install markdown).
+QQ 使用 SMTP_USERNAME、SMTP_PASSWORD（专用授权码）和 RADAR_EMAIL_TO。
+Resend 保留 RESEND_API_KEY、EMAIL_FROM 和 RADAR_EMAIL_TO 的原有用法。
+未配置收件人时跳过发送。HTML 正文需要 markdown 包。
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import smtplib
+import ssl
 import urllib.error
 import urllib.request
+from email.message import EmailMessage
 
 from . import UA
 
@@ -53,6 +55,39 @@ def recipients(raw: str) -> list[str]:
     return [p.strip("\"'<>") for p in parts if p.strip("\"'<>")]
 
 
+def _send_qq(subject: str, md_text: str, to: list[str]) -> str:
+    """通过 QQ 的 SSL SMTP 发送日报；授权码仅从环境变量读取。"""
+    required = ("SMTP_USERNAME", "SMTP_PASSWORD")
+    missing = [name for name in required if not os.environ.get(name, "").strip()]
+    if missing:
+        return "邮件未发送：缺少 " + "、".join(missing)
+    username = os.environ["SMTP_USERNAME"].strip()
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = username
+    message["To"] = ", ".join(to)
+    message.set_content(md_text)
+    message.add_alternative(html(md_text), subtype="html")
+    smtp = None
+    try:
+        smtp = smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30, context=ssl.create_default_context())
+        smtp.login(username, os.environ["SMTP_PASSWORD"].strip())
+        refused = smtp.send_message(message, from_addr=username, to_addrs=to)
+        if refused:
+            raise SystemExit("QQ 邮件发送失败：部分收件地址被拒绝，请检查邮箱设置。")
+    except (smtplib.SMTPException, OSError) as exc:
+        # 服务端响应可能包含账号信息，日志仅保留异常类型。
+        raise SystemExit(f"QQ 邮件发送失败（{type(exc).__name__}），请检查 SMTP 授权码、邮箱设置或网络。") from None
+    finally:
+        if smtp is not None:
+            try:
+                # 以 DATA 接受结果为准，关闭连接的异常不改变已提交状态。
+                smtp.close()
+            except OSError:
+                pass
+    return "邮件已提交至 QQ SMTP，最终送达以收件箱为准。"
+
+
 def send(subject: str, md_text: str) -> str:
     to = recipients(os.environ.get("RADAR_EMAIL_TO", ""))
     if not to:
@@ -60,6 +95,8 @@ def send(subject: str, md_text: str) -> str:
     bad = [i + 1 for i, a in enumerate(to) if not _ADDRESS.match(a)]
     if bad:   # the address itself stays out of the log
         raise SystemExit(f"RADAR_EMAIL_TO: {len(to)} address(es), number {bad} is not an email address")
+    if os.environ.get("RADAR_MAIL_PROVIDER") == "qq":
+        return _send_qq(subject, md_text, to)
     body = json.dumps({"from": os.environ["EMAIL_FROM"], "to": to, "subject": subject, "html": html(md_text)}).encode()
     # Resend sits behind Cloudflare, which answers Python's default User-Agent with 403 "error code: 1010".
     req = urllib.request.Request("https://api.resend.com/emails", data=body, method="POST", headers={
